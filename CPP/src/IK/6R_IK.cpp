@@ -118,8 +118,8 @@ namespace IKS
         return inconsistent_solution;
     }
 
-    General_6R::General_6R(const Eigen::Matrix<double, 3, 6> &H, const Eigen::Matrix<double, 3, 7> &P)
-        : General_Robot(H,P), H(H), P(P)
+    General_6R::General_6R(const Eigen::Matrix<double, 3, 6> &H, const Eigen::Matrix<double, 3, 7> &P, double wrist_concurrency_tol)
+        : General_Robot(H,P), H(H), P(P), wrist_concurrency_tol(wrist_concurrency_tol)
     {
         this->kinematicClass = determine_Kinematic_Class();
     }
@@ -182,7 +182,7 @@ namespace IKS
             const auto&[H_reversed, P_reversed] = reverse_kinematic_chain(this->H, this->P);
             const Eigen::MatrixXd P_reversed_remodeled = EAIK::remodel_kinematics(H_reversed, P_reversed, ZERO_THRESH, ZERO_THRESH);
 
-            this->reversed_Robot_ptr = std::make_unique<General_6R>(H_reversed, P_reversed_remodeled);
+            this->reversed_Robot_ptr = std::make_unique<General_6R>(H_reversed, P_reversed_remodeled, wrist_concurrency_tol);
             return KinematicClass::REVERSED;
         }
         
@@ -198,7 +198,7 @@ namespace IKS
             {
                 // h3 || h4 || h5
                 const auto&[H_reversed, P_reversed] = reverse_kinematic_chain(this->H, this->P);
-                this->reversed_Robot_ptr = std::make_unique<General_6R>(H_reversed, P_reversed);
+                this->reversed_Robot_ptr = std::make_unique<General_6R>(H_reversed, P_reversed, wrist_concurrency_tol);
                 return KinematicClass::REVERSED;
             }
         }
@@ -213,7 +213,7 @@ namespace IKS
             const Eigen::Vector3d p04 = P.block<3,4>(0,0).rowwise().sum();
             const Eigen::Vector3d intersection = EAIK::calc_intersection(H.col(3), H.col(4), p04,P.col(4), ZERO_THRESH);
 
-            if(EAIK::is_point_on_Axis(H.col(5), p04+P.col(4)+P.col(5), intersection, ZERO_THRESH))
+            if(EAIK::is_point_on_Axis(H.col(5), p04+P.col(4)+P.col(5), intersection, wrist_concurrency_tol))
             {
                 // Check for parallel axes
                 if (this->H.col(0).cross(this->H.col(1)).norm() < ZERO_THRESH)
@@ -250,12 +250,12 @@ namespace IKS
         {
             const Eigen::Vector3d intersection = EAIK::calc_intersection(H.col(0), H.col(1), P.col(0), P.col(1), ZERO_THRESH);
 
-            if(EAIK::is_point_on_Axis(H.col(2), P.col(0)+P.col(1)+P.col(2), intersection, ZERO_THRESH))
+            if(EAIK::is_point_on_Axis(H.col(2), P.col(0)+P.col(1)+P.col(2), intersection, wrist_concurrency_tol))
             {
                 const auto&[H_reversed, P_reversed] = reverse_kinematic_chain(this->H, this->P);
                 const Eigen::MatrixXd P_reversed_remodeled = EAIK::remodel_kinematics(H_reversed, P_reversed, ZERO_THRESH, ZERO_THRESH);
 
-                this->reversed_Robot_ptr = std::make_unique<General_6R>(H_reversed, P_reversed_remodeled);
+                this->reversed_Robot_ptr = std::make_unique<General_6R>(H_reversed, P_reversed_remodeled, wrist_concurrency_tol);
                 // Spherical Wrist at the base of the robot
                 return KinematicClass::REVERSED;
             }

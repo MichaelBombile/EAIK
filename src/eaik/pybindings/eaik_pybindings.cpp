@@ -27,7 +27,7 @@ PYBIND11_MODULE(EAIK, m)
         });
 
     py::class_<EAIK::Robot>(m, "Robot")
-        .def(py::init<const Eigen::MatrixXd &, const Eigen::MatrixXd &, const Eigen::Matrix<double, 3, 3> &, const std::vector<std::pair<int, double>>&, bool>(), R"pbdoc(
+        .def(py::init<const Eigen::MatrixXd &, const Eigen::MatrixXd &, const Eigen::Matrix<double, 3, 3> &, const std::vector<std::pair<int, double>>&, bool, double>(), R"pbdoc(
             The EAIK Robot class.
 
             :param H:  Unit vectors defining the joint axes
@@ -35,9 +35,10 @@ PYBIND11_MODULE(EAIK, m)
             :param R6T:  Endeffector orientation w.r.t. joint 6
             :param fixed_axes:  List of tuples defining fixed joints (zero-indexed) (i, q_i+1)    
             :param use_double_precision:  Use double precision (standard)
+            :param wrist_concurrency_tol:  Max distance (m) for last three joint axes to be treated as concurrent; negative uses default (1e-4)
         )pbdoc",
-        py::arg("H"), py::arg("P"), py::arg("R6T"), py::arg("fixed_axes"), py::arg("use_double_precision"))
-        .def(py::init<const Eigen::VectorXd&, const Eigen::VectorXd&, const Eigen::VectorXd&, const Eigen::Matrix<double, 3, 3> &, const std::vector<std::pair<int, double>>&, bool>(), R"pbdoc(
+        py::arg("H"), py::arg("P"), py::arg("R6T"), py::arg("fixed_axes"), py::arg("use_double_precision"), py::arg("wrist_concurrency_tol") = -1.0)
+        .def(py::init<const Eigen::VectorXd&, const Eigen::VectorXd&, const Eigen::VectorXd&, const Eigen::Matrix<double, 3, 3> &, const std::vector<std::pair<int, double>>&, bool, double>(), R"pbdoc(
             The EAIK Robot class.
 
             :param dh_alpha:  DH-Parameters: alpha
@@ -46,8 +47,9 @@ PYBIND11_MODULE(EAIK, m)
             :param R6T:  Endeffector orientation w.r.t. joint 6
             :param fixed_axes:  List of tuples defining fixed joints (zero-indexed) (i, q_i+1)    
             :param use_double_precision:  Use double precision (standard)
+            :param wrist_concurrency_tol:  Max distance (m) for last three joint axes to be treated as concurrent; negative uses default (1e-4)
         )pbdoc",
-        py::arg("dh_alpha"), py::arg("dh_a"), py::arg("dh_d"), py::arg("R6T"), py::arg("fixed_axes"), py::arg("use_double_precision"))
+        py::arg("dh_alpha"), py::arg("dh_a"), py::arg("dh_d"), py::arg("R6T"), py::arg("fixed_axes"), py::arg("use_double_precision"), py::arg("wrist_concurrency_tol") = -1.0)
         .def("calculate_IK", &EAIK::Robot::calculate_Eigen_IK, R"pbdoc(
             Run inverse kinematics.
 

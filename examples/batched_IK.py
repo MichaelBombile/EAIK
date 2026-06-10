@@ -34,4 +34,5 @@ def batched_ik_example(path, batch_size):
     print("Number analytical: ", len(poses)-total_num_ls)
     print("Number LS: ", total_num_ls)
     
-batched_ik_example("Puma560.urdf", 5000)
+# batched_ik_example("Puma560.urdf", 5000)
+batched_ik_example("C:/Users/MichaelBombile/cynpy/azure_codes/robotic-setup-description/robotic_system/urdf/m0609_white.urdf", 100)

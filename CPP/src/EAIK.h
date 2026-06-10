@@ -12,8 +12,8 @@ namespace EAIK
     class Robot
     {
     public:
-        Robot(const Eigen::MatrixXd &H, const Eigen::MatrixXd &P, const Eigen::Matrix<double, 3, 3> &R6T=Eigen::Matrix<double, 3, 3>::Identity(), const std::vector<std::pair<int, double>>& fixed_axes={}, bool is_double_precision=true);
-        Robot(const Eigen::VectorXd& dh_alpha, const Eigen::VectorXd& dh_a, const Eigen::VectorXd& dh_d, const Eigen::Matrix<double, 3, 3> &R6T=Eigen::Matrix<double, 3, 3>::Identity(), const std::vector<std::pair<int, double>>& fixed_axes={}, bool is_double_precision=true);
+        Robot(const Eigen::MatrixXd &H, const Eigen::MatrixXd &P, const Eigen::Matrix<double, 3, 3> &R6T=Eigen::Matrix<double, 3, 3>::Identity(), const std::vector<std::pair<int, double>>& fixed_axes={}, bool is_double_precision=true, double wrist_concurrency_tol=-1.0);
+        Robot(const Eigen::VectorXd& dh_alpha, const Eigen::VectorXd& dh_a, const Eigen::VectorXd& dh_d, const Eigen::Matrix<double, 3, 3> &R6T=Eigen::Matrix<double, 3, 3>::Identity(), const std::vector<std::pair<int, double>>& fixed_axes={}, bool is_double_precision=true, double wrist_concurrency_tol=-1.0);
 
         IKS::IK_Solution calculate_IK(const IKS::Homogeneous_T &ee_position_orientation) const;
         std::vector<IKS::IK_Solution> calculate_IK_batched(std::vector<IKS::Homogeneous_T> EE_pose_batch, const unsigned worker_threads) const;
@@ -37,7 +37,7 @@ namespace EAIK
         
     private:
         // Init function to allow nice constructor overloading
-        void init(const Eigen::MatrixXd &H, const Eigen::MatrixXd &P, const std::vector<std::pair<int, double>>& fixed_axes={}, bool is_double_precision=true);
+        void init(const Eigen::MatrixXd &H, const Eigen::MatrixXd &P, const std::vector<std::pair<int, double>>& fixed_axes={}, bool is_double_precision=true, double wrist_concurrency_tol=-1.0);
         std::unique_ptr<IKS::General_Robot> bot_kinematics;
         std::unique_ptr<IKS::General_Robot> original_kinematics; // Forward Kinematics calculated by original kinematics
 
@@ -46,6 +46,7 @@ namespace EAIK
         // single precision default thresholds
         double ZERO_THRESHOLD = 1e-7; 
         double AXIS_INTERSECT_THRESHOLD = 1e-6;
+        double WRIST_CONCURRENCY_TOL = 1e-4;
         
         Eigen::Matrix<double, 3, 3> R6T;
         Eigen::Matrix<double, 3, 3> R6T_partial;

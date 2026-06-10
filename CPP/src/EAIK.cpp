@@ -9,25 +9,27 @@
 
 namespace EAIK
 {
-    Robot::Robot(const Eigen::VectorXd& dh_alpha, const Eigen::VectorXd& dh_a, const Eigen::VectorXd& dh_d, const Eigen::Matrix<double, 3, 3> &R6T, const std::vector<std::pair<int, double>>& fixed_axes, bool is_double_precision)
+    Robot::Robot(const Eigen::VectorXd& dh_alpha, const Eigen::VectorXd& dh_a, const Eigen::VectorXd& dh_d, const Eigen::Matrix<double, 3, 3> &R6T, const std::vector<std::pair<int, double>>& fixed_axes, bool is_double_precision, double wrist_concurrency_tol)
     {
         const auto&[H, P, R6T_dh] = IKS::dh_to_H_P(dh_alpha, dh_a, dh_d);
         this->R6T = R6T*R6T_dh;
-        init(H, P, fixed_axes, is_double_precision);
+        init(H, P, fixed_axes, is_double_precision, wrist_concurrency_tol);
     }
 
-    Robot::Robot(const Eigen::MatrixXd &H, const Eigen::MatrixXd &P, const Eigen::Matrix<double, 3, 3> &R6T, const std::vector<std::pair<int, double>>& fixed_axes, bool is_double_precision) : R6T(R6T)
+    Robot::Robot(const Eigen::MatrixXd &H, const Eigen::MatrixXd &P, const Eigen::Matrix<double, 3, 3> &R6T, const std::vector<std::pair<int, double>>& fixed_axes, bool is_double_precision, double wrist_concurrency_tol) : R6T(R6T)
     {
-        init(H, P, fixed_axes, is_double_precision);
+        init(H, P, fixed_axes, is_double_precision, wrist_concurrency_tol);
     }
 
-    void Robot::init(const Eigen::MatrixXd &H, const Eigen::MatrixXd &P, const std::vector<std::pair<int, double>>& fixed_axes, bool is_double_precision)
+    void Robot::init(const Eigen::MatrixXd &H, const Eigen::MatrixXd &P, const std::vector<std::pair<int, double>>& fixed_axes, bool is_double_precision, double wrist_concurrency_tol)
     {
         if(is_double_precision)
         {
             ZERO_THRESHOLD = 1e-13;
             AXIS_INTERSECT_THRESHOLD = 1e-9;
         }
+
+        WRIST_CONCURRENCY_TOL = wrist_concurrency_tol >= 0.0 ? wrist_concurrency_tol : 1e-4;
 
         if(P.cols() != H.cols() + 1)
         {
@@ -57,7 +59,7 @@ namespace EAIK
         switch (H_remodeled.cols())
         {
         case 6:
-            bot_kinematics = std::make_unique<IKS::General_6R>(H_remodeled, P_remodeled);
+            bot_kinematics = std::make_unique<IKS::General_6R>(H_remodeled, P_remodeled, WRIST_CONCURRENCY_TOL);
             original_kinematics = std::make_unique<IKS::General_Robot>(H, P);
             break;
         case 5:

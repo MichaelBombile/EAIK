@@ -10,7 +10,8 @@ class HomogeneousRobot(IKRobot):
     def __init__(self,
                  joint_trafos: np.ndarray,
                  fixed_axes: list[tuple[int, float]] = None,
-                 joint_axis: np.array = np.array([0, 0, 1])):
+                 joint_axis: np.array = np.array([0, 0, 1]),
+                 wrist_concurrency_tol: float = -1.0):
         """
         EAIK Robot parametrized by homogeneous joint transformations
 
@@ -18,6 +19,7 @@ class HomogeneousRobot(IKRobot):
             frame, i.e. (T01, T02, ..., T0EE)
         :param fixed_axes: List of tuples defining fixed joints (zero-indexed) (i, q_i+1)
         :param joint_axis: Unit vector of joint axis orientation within each frame in joint_trafos (e.g., z-axis)
+        :param wrist_concurrency_tol: Max distance (m) for wrist axes to be treated as concurrent; negative uses default (1e-4)
         """
         super().__init__()
         if fixed_axes is None:
@@ -39,4 +41,4 @@ class HomogeneousRobot(IKRobot):
         P = np.vstack([P, p_EE])
         rNt = joint_trafos[-1][:-1, :-1]  # Rotation in global basis frame
 
-        self._robot = EAIK.Robot(H.T, P.T, rNt, fixed_axes, True)
+        self._robot = EAIK.Robot(H.T, P.T, rNt, fixed_axes, True, wrist_concurrency_tol)

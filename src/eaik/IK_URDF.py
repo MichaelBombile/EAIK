@@ -10,12 +10,14 @@ class UrdfRobot(IKRobot):
 
     def __init__(self,
                  file_path: str,
-                 fixed_axes: list[tuple[int, float]] = None):
+                 fixed_axes: list[tuple[int, float]] = None,
+                 wrist_concurrency_tol: float = -1.0):
         """
         EAIK Robot parametrized by URDF file
 
         :param file_path: Path to URDF file
         :param fixed_axes: List of tuples defining fixed joints (zero-indexed) (i, q_i+1)
+        :param wrist_concurrency_tol: Max distance (m) for wrist axes to be treated as concurrent; negative uses default (1e-4)
         """
         if fixed_axes is None:
             fixed_axes = []
@@ -37,4 +39,4 @@ class UrdfRobot(IKRobot):
 
         # End effector displacement is (0,0,0)
         P = np.vstack([P, np.zeros(3)])
-        self._robot = EAIK.Robot(H.T, P.T, np.eye(3), fixed_axes, True)
+        self._robot = EAIK.Robot(H.T, P.T, np.eye(3), fixed_axes, True, wrist_concurrency_tol)

@@ -181,7 +181,7 @@ namespace IKS
     {
         // General 6R Manipulator
     public:
-        General_6R(const Eigen::Matrix<double, 3, 6> &H, const Eigen::Matrix<double, 3, 7> &P);
+        General_6R(const Eigen::Matrix<double, 3, 6> &H, const Eigen::Matrix<double, 3, 7> &P, double wrist_concurrency_tol=1e-4);
         IK_Solution calculate_IK(const Homogeneous_T &ee_position_orientation) const override;
 
         bool has_known_decomposition() const override;
@@ -210,6 +210,8 @@ namespace IKS
         Eigen::Matrix<double, 3, 7> P;
 
         KinematicClass kinematicClass{KinematicClass::UNKNOWN};
+
+        double wrist_concurrency_tol{1e-4};
 
         std::unique_ptr<General_6R> reversed_Robot_ptr;   // If kinematic class demands kinematic inversion, this robot will be used
     };
