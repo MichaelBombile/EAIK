@@ -1,18 +1,23 @@
+import argparse
+
 import numpy as np
 import random
 from eaik.IK_URDF import UrdfRobot
 import evaluate_ik as eval
+
+DEFAULT_URDF = "Puma560.urdf"
+DEFAULT_BATCH_SIZE = 500
 
 def urdf_example(path, batch_size):
     """
     Loads spherical-wrist robot from urdf, calculates IK using subproblems and checks the solution for a certian batch size
     """
     bot = UrdfRobot(path, [])
-    print("Kinematic Family of the Robot: ", bot.kinematicFamily())
-    print("Joint axes orientations before remodeling: \n",bot.H_original())
-    print("Joint axes' reference points before remodeling: \n", bot.P_original())
-    print("Joint axes orientations after remodeling: \n", bot.H_remodeled())
-    print("Joint axes' reference points after remodeling: \n", bot.P_remodeled())
+    print("Kinematic Family of the Robot: ", bot.getKinematicFamily())
+    print("Joint axes orientations before remodeling: \n", bot.getOriginal_H())
+    print("Joint axes' reference points before remodeling: \n", bot.getOriginal_P())
+    print("Joint axes orientations after remodeling: \n", bot.getRemodeled_H())
+    print("Joint axes' reference points after remodeling: \n", bot.getRemodeled_P())
 
     # Example desired pose
     test_angles = []
@@ -39,5 +44,24 @@ def urdf_example(path, batch_size):
     print("Avg. Position Error: ", sum_pos_error/len(poses))
     print("Number analytical: ", len(poses)-total_num_ls)
     print("Number LS: ", total_num_ls)
-            
-urdf_example("Puma560.urdf", 500)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Run single-pose IK on random poses from a URDF robot.")
+    parser.add_argument(
+        "--urdf",
+        default=DEFAULT_URDF,
+        help="Path to the robot URDF file",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        help="Number of random poses to solve",
+    )
+    args = parser.parse_args()
+    urdf_example(args.urdf, args.batch_size)
+
+
+if __name__ == "__main__":
+    main()
