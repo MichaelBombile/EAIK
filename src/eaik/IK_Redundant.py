@@ -528,8 +528,8 @@ class SearchableRedundantUrdfRobot(IKRobot):
             raise ValueError("SearchableRedundantUrdfRobot expects exactly one pre-locked joint for a 7-DOF arm.")
 
         search_method = search_method.lower()
-        if search_method not in {"brent", "grid"}:
-            raise ValueError("search_method must be 'brent' or 'grid'")
+        if search_method not in {"brent", "grid", "analytical"}:
+            raise ValueError("search_method must be 'brent', 'grid', or 'analytical'")
 
         super().__init__()
         self._file_path = file_path
@@ -569,9 +569,68 @@ class SearchableRedundantUrdfRobot(IKRobot):
         key = self._robot_cache_key(fixed_axes)
         robot = self._robot_cache.get(key)
         if robot is None:
-            robot = EAIK.Robot(self._H.T, self._P.T, self._R6T, list(key), True, self._wrist_concurrency_tol)
+            try:
+                robot = EAIK.Robot(
+                    self._H.T,
+                    self._P.T,
+                    self._R6T,
+                    list(key),
+                    True,
+                    self._wrist_concurrency_tol,
+                )
+            except RuntimeError:
+                return None
             self._robot_cache[key] = robot
         return robot
+
+    def _supports_sp3_analytical(self, family: str) -> bool:
+        return "INTERSECTING" in family and "PARALLEL" not in family
+
+    def _sp3_q3_candidates(
+        self,
+        pose: np.ndarray,
+        joint_index: int,
+        seed_q3: float,
+    ) -> list[float]:
+        """
+        Closed-form SP3 candidates for the 5R subproblem that normally searches q3.
+
+        Uses the same p_15 construction as EAIK's 5R-FOURTH_FITH_INTERSECTING* solvers.
+        """
+        bot = self._get_robot(self._fixed_axes + [(joint_index, float(seed_q3))])
+        if bot is None or not bot.has_known_decomposition():
+            return [float(seed_q3)]
+
+        p_cols = np.asarray(bot.get_remodeled_P())
+        if p_cols.shape[1] < 6:
+            return [float(seed_q3)]
+
+        rotation = pose[:3, :3]
+        p15 = pose[:3, 3] - p_cols[:, 0] - rotation @ p_cols[:, -1]
+        side_a = float(np.linalg.norm(p_cols[:, 3]))
+        side_b = float(np.linalg.norm(p_cols[:, 2]))
+        side_c = float(np.linalg.norm(p15))
+        denom = 2.0 * side_a * side_b
+        if denom < 1e-12:
+            return [float(seed_q3)]
+
+        cos_q = np.clip((side_a * side_a + side_b * side_b - side_c * side_c) / denom, -1.0, 1.0)
+        if abs(cos_q) >= 1.0 - 1e-12:
+            return [float(seed_q3)]
+
+        offset = float(np.arccos(cos_q))
+        return [float(seed_q3 + offset), float(seed_q3 - offset)]
+
+    def _safe_best_ik_at_search_angle(
+        self,
+        pose: np.ndarray,
+        joint_index: int,
+        search_angle: float,
+    ) -> tuple[float, np.ndarray | None, bool]:
+        try:
+            return self._best_ik_at_search_angle(pose, joint_index, float(search_angle))
+        except RuntimeError:
+            return np.inf, None, True
 
     def _joint_bounds(self, joint_index: int) -> tuple[float, float]:
         lower, upper = self._joint_limits[joint_index]
@@ -596,8 +655,9 @@ class SearchableRedundantUrdfRobot(IKRobot):
         for joint_index in requested_candidates:
             seed = self._seed_angle(joint_index)
             bot = self._get_robot(self._fixed_axes + [(joint_index, seed)])
-            if bot.has_known_decomposition():
-                candidate_info.append(
+            if bot is None or not bot.has_known_decomposition():
+                continue
+            candidate_info.append(
                     {
                         "joint_index": joint_index,
                         "joint": joint_index + 1,
@@ -641,7 +701,7 @@ class SearchableRedundantUrdfRobot(IKRobot):
     ) -> tuple[float, np.ndarray | None, bool]:
         """Run 5R IK once and score only the best analytical branch."""
         bot = self._get_robot(self._fixed_axes + [(joint_index, float(search_angle))])
-        if not bot.has_known_decomposition():
+        if bot is None or not bot.has_known_decomposition():
             return np.inf, None, True
 
         sols = bot.calculate_IK(pose)
@@ -780,6 +840,61 @@ class SearchableRedundantUrdfRobot(IKRobot):
 
         return [(state["best_ls"], state["best_err"], state["best_row"])]
 
+    def _collect_sp3_candidates(
+        self,
+        pose: np.ndarray,
+        joint_index: int,
+    ) -> list[float]:
+        lower, upper = self._joint_bounds(joint_index)
+        seeds = [0.0]
+        if self._warm_start and joint_index in self._last_search_angle:
+            seeds.append(float(self._last_search_angle[joint_index]))
+        if lower <= 0.0 <= upper:
+            seeds.append(0.0)
+
+        candidates: set[float] = set()
+        for seed in seeds:
+            for angle in self._sp3_q3_candidates(pose, joint_index, seed):
+                candidates.add(float(np.clip(angle, lower, upper)))
+        return sorted(candidates)
+
+    def _search_analytical(
+        self,
+        pose: np.ndarray,
+        joint_index: int,
+        family: str,
+    ) -> list[tuple[bool, float, np.ndarray]]:
+        if not self._supports_sp3_analytical(family):
+            return self._search_brent(pose, joint_index)
+
+        ranked_rows: list[tuple[bool, float, np.ndarray]] = []
+        candidates = self._collect_sp3_candidates(pose, joint_index)
+
+        for _ in range(max(1, self._refinement_steps + 1)):
+            best_err = np.inf
+            best_q = None
+            for q3 in candidates:
+                err, row, is_ls = self._safe_best_ik_at_search_angle(pose, joint_index, q3)
+                if row is None:
+                    continue
+                ranked_rows.append((is_ls, err, row))
+                if err < best_err:
+                    best_err = err
+                    best_q = float(q3)
+                if err <= self._solution_tolerance:
+                    self._last_search_angle[joint_index] = float(q3)
+                    return ranked_rows
+
+            if best_q is None:
+                break
+
+            self._last_search_angle[joint_index] = best_q
+            candidates = self._collect_sp3_candidates(pose, joint_index)
+            if best_err <= self._solution_tolerance:
+                break
+
+        return ranked_rows
+
     def getLockJoint(self) -> int:
         return self._fixed_axes[0][0] + 1
 
@@ -808,11 +923,21 @@ class SearchableRedundantUrdfRobot(IKRobot):
             return EAIK.IKSolution()
 
         ranked_rows: list[tuple[bool, float, np.ndarray]] = []
-        search_fn = self._search_brent if self._search_method == "brent" else self._search_grid
+        if self._search_method == "brent":
+            search_fn = self._search_brent
+        elif self._search_method == "analytical":
+            search_fn = None
+        else:
+            search_fn = self._search_grid
 
         for candidate in self._candidate_info:
             joint_index = candidate["joint_index"]
-            ranked_rows.extend(search_fn(pose, joint_index))
+            if search_fn is None:
+                ranked_rows.extend(
+                    self._search_analytical(pose, joint_index, candidate["family"])
+                )
+            else:
+                ranked_rows.extend(search_fn(pose, joint_index))
             if ranked_rows:
                 ranked_rows.sort(key=lambda item: (item[0], item[1]))
                 if ranked_rows[0][1] <= self._solution_tolerance:

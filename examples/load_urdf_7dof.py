@@ -246,9 +246,9 @@ def main():
     )
     parser.add_argument(
         "--search-method",
-        choices=("brent", "grid"),
-        default="brent",
-        help="1D redundancy search for semi-analytical mode (default: brent)",
+        choices=("analytical", "brent", "grid"),
+        default="analytical",
+        help="1D redundancy search: analytical (SP3 roots + 5R IK), brent, or grid",
     )
     parser.add_argument(
         "--search-grid-size",
