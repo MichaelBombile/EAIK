@@ -1,11 +1,504 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import numpy as np
 from scipy.optimize import minimize_scalar
 
 import eaik.pybindings.EAIK as EAIK
 from eaik.IK_Robot import IKRobot
-from eaik.IK_URDF import parse_urdf_kinematics
+from eaik.IK_URDF import UrdfRobot, parse_urdf_kinematics
+
+
+def _family_rank(family: str) -> int:
+    upper = family.upper()
+    if "UNKNOWN" in upper:
+        return 3
+    if "PARALLEL" in upper:
+        return 2
+    return 1
+
+
+def _config_sort_key(config: dict) -> tuple:
+    mode_rank = 0 if config["mode"] == "analytical" else 1
+    family_rank = _family_rank(config["family"])
+    # Prefer wrist locks (higher joint index) when families tie.
+    lock_rank = -config["lock_index"]
+    search_rank = config["search_index"] if config["search_index"] is not None else -1
+    return (mode_rank, family_rank, lock_rank, search_rank)
+
+
+def discover_redundancy_configs(
+    file_path: str,
+    locked_angle: float = 0.0,
+    wrist_concurrency_tol: float = -1.0,
+) -> list[dict]:
+    """
+    Enumerate supported single-lock 6R and lock+search 5R reductions for a 7-DOF URDF.
+
+    Returns configs sorted best-first by decomposition quality.
+    """
+    _, _, H, P, ee_rotation, _ = parse_urdf_kinematics(file_path)
+    if H.shape[0] != 7:
+        raise ValueError(f"Expected a 7-DOF URDF, got {H.shape[0]} actuated joints.")
+
+    configs: list[dict] = []
+
+    for lock_index in range(7):
+        bot = EAIK.Robot(
+            H.T,
+            P.T,
+            ee_rotation,
+            [(lock_index, float(locked_angle))],
+            True,
+            wrist_concurrency_tol,
+        )
+        if bot.has_known_decomposition():
+            configs.append(
+                {
+                    "mode": "analytical",
+                    "lock_joint": lock_index + 1,
+                    "lock_index": lock_index,
+                    "search_joint": None,
+                    "search_index": None,
+                    "family": bot.get_kinematic_family(),
+                }
+            )
+
+    for lock_index in range(7):
+        for search_index in range(7):
+            if search_index == lock_index:
+                continue
+            seed = 0.0
+            bot = EAIK.Robot(
+                H.T,
+                P.T,
+                ee_rotation,
+                sorted([(lock_index, float(locked_angle)), (search_index, seed)]),
+                True,
+                wrist_concurrency_tol,
+            )
+            if not bot.has_known_decomposition():
+                continue
+            family = bot.get_kinematic_family()
+            if "Unknown" in family:
+                continue
+            configs.append(
+                {
+                    "mode": "semi-analytical",
+                    "lock_joint": lock_index + 1,
+                    "lock_index": lock_index,
+                    "search_joint": search_index + 1,
+                    "search_index": search_index,
+                    "family": family,
+                }
+            )
+
+    configs.sort(key=_config_sort_key)
+    return configs
+
+
+def select_redundancy_configs(
+    configs: list[dict],
+    lock_joint: int | None = None,
+    search_joint: int | None = None,
+    max_redundancy_configs: int = 1,
+    max_search_joint_candidates: int = 1,
+) -> list[dict]:
+    """Filter and rank redundancy configs for a requested lock/search setup."""
+    if not configs:
+        return []
+
+    max_redundancy_configs = max(1, int(max_redundancy_configs))
+    max_search_joint_candidates = max(1, int(max_search_joint_candidates))
+
+    filtered = configs
+    if lock_joint is not None:
+        filtered = [c for c in filtered if c["lock_joint"] == lock_joint]
+    if search_joint is not None:
+        filtered = [c for c in filtered if c.get("search_joint") == search_joint]
+
+    if not filtered:
+        return []
+
+    if lock_joint is not None:
+        analytical = [c for c in filtered if c["mode"] == "analytical"]
+        if analytical:
+            return analytical[:1]
+
+        semi = [c for c in filtered if c["mode"] == "semi-analytical"]
+        if search_joint is not None:
+            return semi[:1]
+        return semi[:max_search_joint_candidates]
+
+    return filtered[:max_redundancy_configs]
+
+
+class ExploringRedundantUrdfRobot(IKRobot):
+    """
+    Try one or more (lock, search) redundancy reductions and return the best IK solution.
+    """
+
+    def __init__(
+        self,
+        file_path: str,
+        configs: list[dict],
+        locked_angle: float = 0.0,
+        wrist_concurrency_tol: float = -1.0,
+        **search_kwargs,
+    ):
+        if not configs:
+            raise ValueError("ExploringRedundantUrdfRobot requires at least one redundancy config.")
+
+        super().__init__()
+        self._file_path = file_path
+        self._locked_angle = float(locked_angle)
+        self._active_configs = list(configs)
+        self._solvers: list[IKRobot] = []
+        self._solver_labels: list[str] = []
+
+        for config in self._active_configs:
+            solver, label = _build_redundancy_solver(
+                file_path,
+                config,
+                locked_angle,
+                wrist_concurrency_tol,
+                search_joint_candidates=[config["search_index"]]
+                if config.get("search_index") is not None
+                else None,
+                max_search_joint_candidates=1,
+                **search_kwargs,
+            )
+            self._solvers.append(solver)
+            self._solver_labels.append(label)
+
+        self._robot = self._solvers[0]._robot
+
+    def getRedundancyConfigs(self) -> list[dict]:
+        return list(self._active_configs)
+
+    def getLockJoint(self) -> int:
+        return int(self._active_configs[0]["lock_joint"])
+
+    def getSearchJointCandidates(self) -> list[dict]:
+        candidates: list[dict] = []
+        for config, solver in zip(self._active_configs, self._solvers):
+            if config["mode"] != "semi-analytical":
+                continue
+            if hasattr(solver, "getSearchJointCandidates"):
+                candidates.extend(solver.getSearchJointCandidates())
+            else:
+                candidates.append(
+                    {
+                        "joint": config["search_joint"],
+                        "joint_index": config["search_index"],
+                        "family": config["family"],
+                        "lock_joint": config["lock_joint"],
+                    }
+                )
+        return candidates
+
+    def getSearchMethod(self) -> str:
+        for solver in self._solvers:
+            if hasattr(solver, "getSearchMethod"):
+                return solver.getSearchMethod()
+        return "analytical"
+
+    def hasKnownDecomposition(self) -> bool:
+        return any(solver.hasKnownDecomposition() for solver in self._solvers)
+
+    def getKinematicFamily(self) -> str:
+        if len(self._active_configs) == 1:
+            return self._solvers[0].getKinematicFamily()
+
+        families = []
+        for config in self._active_configs:
+            if config["mode"] == "analytical":
+                families.append(f"lock j{config['lock_joint']}:{config['family']}")
+            else:
+                families.append(
+                    f"lock j{config['lock_joint']}, search j{config['search_joint']}:{config['family']}"
+                )
+        return "7R-MULTI[" + "; ".join(families) + "]"
+
+    def IK(self, pose: np.ndarray):
+        ranked_rows: list[tuple[bool, float, np.ndarray]] = []
+        for solver in self._solvers:
+            solution = solver.IK(pose)
+            if len(solution.Q) == 0:
+                continue
+            for row, is_ls in zip(np.asarray(solution.Q), np.asarray(solution.is_LS, dtype=bool)):
+                row = np.asarray(row, dtype=np.float64)
+                err = float(np.linalg.norm(self.fwdKin(row) - pose))
+                ranked_rows.append((bool(is_ls), err, row))
+
+        result = EAIK.IKSolution()
+        if not ranked_rows:
+            return result
+
+        ranked_rows.sort(key=lambda item: (item[0], item[1]))
+        rows: list[np.ndarray] = []
+        ls_flags: list[bool] = []
+        for is_ls, _, row in ranked_rows:
+            duplicate = False
+            for existing in rows:
+                if np.allclose(existing, row, atol=1e-7, rtol=0.0):
+                    duplicate = True
+                    break
+            if duplicate:
+                continue
+            rows.append(row)
+            ls_flags.append(is_ls)
+            break
+
+        result.Q = np.vstack(rows)
+        result.is_LS = np.asarray(ls_flags, dtype=bool)
+        return result
+
+    def IK_batched(self, pose_batch, num_worker_threads=4):
+        return [self.IK(pose) for pose in pose_batch]
+
+
+def _build_redundancy_solver(
+    file_path: str,
+    config: dict,
+    locked_angle: float,
+    wrist_concurrency_tol: float,
+    search_joint_candidates: list[int] | None = None,
+    max_search_joint_candidates: int = 1,
+    **search_kwargs,
+):
+    lock_index = config["lock_index"]
+    if config["mode"] == "analytical":
+        solver = UrdfRobot(file_path, [(lock_index, locked_angle)], wrist_concurrency_tol)
+        label = f"lock j{config['lock_joint']} -> {config['family']}"
+        return solver, label
+
+    solver = SearchableRedundantUrdfRobot(
+        file_path,
+        [(lock_index, locked_angle)],
+        search_joint_candidates=search_joint_candidates,
+        max_search_joint_candidates=max_search_joint_candidates,
+        wrist_concurrency_tol=wrist_concurrency_tol,
+        **search_kwargs,
+    )
+    if search_joint_candidates is not None and len(search_joint_candidates) == 1:
+        label = (
+            f"lock j{config['lock_joint']}, search j{search_joint_candidates[0] + 1} "
+            f"-> {config['family']}"
+        )
+    else:
+        label = f"lock j{config['lock_joint']} -> multi-search"
+    return solver, label
+
+
+def _smoke_test_redundancy_config(
+    file_path: str,
+    lock_index: int,
+    search_index: int,
+    locked_angle: float,
+    wrist_concurrency_tol: float,
+) -> bool:
+    """Return True if a lock/search pair survives a single IK smoke test."""
+    eaik_src = Path(__file__).resolve().parent
+    script = f"""
+import numpy as np
+import eaik
+eaik.__path__.insert(0, {str(eaik_src)!r})
+from eaik.IK_Redundant import SearchableRedundantUrdfRobot
+
+bot = SearchableRedundantUrdfRobot(
+    {file_path!r},
+    [({lock_index}, {float(locked_angle)})],
+    search_joint_candidates=[{search_index}],
+    search_method="grid",
+    search_grid_size=5,
+    refinement_steps=0,
+    wrist_concurrency_tol={float(wrist_concurrency_tol)},
+)
+joints = np.zeros(7)
+joints[{lock_index}] = {float(locked_angle)}
+pose = bot.fwdKin(joints)
+solution = bot.IK(pose)
+if len(solution.Q) == 0:
+    raise SystemExit(2)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _best_search_configs_per_lock(
+    file_path: str,
+    locked_angle: float,
+    wrist_concurrency_tol: float,
+    max_per_lock: int = 1,
+    validate_ik: bool = False,
+) -> list[dict]:
+    """Rank the best search joint(s) for each lock using kinematic priority."""
+    per_lock_best: list[dict] = []
+    for lock_index in range(7):
+        probe = SearchableRedundantUrdfRobot(
+            file_path,
+            [(lock_index, locked_angle)],
+            max_search_joint_candidates=7,
+            wrist_concurrency_tol=wrist_concurrency_tol,
+        )
+        added = 0
+        for entry in probe.getSearchJointCandidates():
+            if validate_ik and not _smoke_test_redundancy_config(
+                file_path,
+                lock_index,
+                entry["joint_index"],
+                locked_angle,
+                wrist_concurrency_tol,
+            ):
+                continue
+            per_lock_best.append(
+                {
+                    "mode": "semi-analytical",
+                    "lock_joint": lock_index + 1,
+                    "lock_index": lock_index,
+                    "search_joint": entry["joint"],
+                    "search_index": entry["joint_index"],
+                    "family": entry["family"],
+                }
+            )
+            added += 1
+            if added >= max(1, int(max_per_lock)):
+                break
+    per_lock_best.sort(key=_config_sort_key)
+    return per_lock_best
+
+
+def _auto_select_configs(
+    file_path: str,
+    locked_angle: float,
+    wrist_concurrency_tol: float,
+    max_redundancy_configs: int,
+) -> list[dict]:
+    all_configs = discover_redundancy_configs(file_path, locked_angle, wrist_concurrency_tol)
+    analytical = [config for config in all_configs if config["mode"] == "analytical"]
+    if analytical:
+        return analytical[:1]
+
+    ranked = _best_search_configs_per_lock(
+        file_path,
+        locked_angle,
+        wrist_concurrency_tol,
+        max_per_lock=1,
+        validate_ik=max_redundancy_configs > 1,
+    )
+    if not ranked:
+        return []
+    return ranked[:max(1, int(max_redundancy_configs))]
+
+
+def build_redundant_urdf_robot(
+    file_path: str,
+    lock_joint: int | None = None,
+    locked_angle: float = 0.0,
+    search_joint: int | None = None,
+    max_redundancy_configs: int = 1,
+    max_search_joint_candidates: int = 1,
+    wrist_concurrency_tol: float = -1.0,
+    **search_kwargs,
+) -> tuple[IKRobot, str, list[dict], int]:
+    """
+    Build the best available 7-DOF redundancy solver for a URDF.
+
+    Returns (robot, mode, active_configs, resolved_lock_joint).
+    """
+    if lock_joint is None:
+        active_configs = _auto_select_configs(
+            file_path,
+            locked_angle,
+            wrist_concurrency_tol,
+            max_redundancy_configs,
+        )
+        if not active_configs:
+            raise ValueError("No supported redundancy configurations found for this URDF.")
+        if len(active_configs) == 1:
+            lock_joint = active_configs[0]["lock_joint"]
+            if active_configs[0]["mode"] == "analytical":
+                solver, _ = _build_redundancy_solver(
+                    file_path,
+                    active_configs[0],
+                    locked_angle,
+                    wrist_concurrency_tol,
+                )
+                return solver, "analytical", active_configs, lock_joint
+            search_joint = active_configs[0]["search_joint"]
+        else:
+            solver = ExploringRedundantUrdfRobot(
+                file_path,
+                active_configs,
+                locked_angle=locked_angle,
+                wrist_concurrency_tol=wrist_concurrency_tol,
+                **search_kwargs,
+            )
+            return solver, "semi-analytical", solver.getRedundancyConfigs(), solver.getLockJoint()
+
+    lock_index = lock_joint - 1
+    analytical_bot = UrdfRobot(file_path, [(lock_index, locked_angle)], wrist_concurrency_tol)
+    if analytical_bot.hasKnownDecomposition():
+        config = {
+            "mode": "analytical",
+            "lock_joint": lock_joint,
+            "lock_index": lock_index,
+            "search_joint": None,
+            "search_index": None,
+            "family": analytical_bot.getKinematicFamily(),
+        }
+        return analytical_bot, "analytical", [config], lock_joint
+
+    if search_joint is not None:
+        search_indices = [search_joint - 1]
+        semi_config = {
+            "mode": "semi-analytical",
+            "lock_joint": lock_joint,
+            "lock_index": lock_index,
+            "search_joint": search_joint,
+            "search_index": search_joint - 1,
+            "family": "",
+        }
+        solver, _ = _build_redundancy_solver(
+            file_path,
+            semi_config,
+            locked_angle,
+            wrist_concurrency_tol,
+            search_joint_candidates=search_indices,
+            max_search_joint_candidates=1,
+            **search_kwargs,
+        )
+        return solver, "semi-analytical", solver.getSearchJointCandidates(), lock_joint
+
+    solver, _ = _build_redundancy_solver(
+        file_path,
+        {
+            "mode": "semi-analytical",
+            "lock_joint": lock_joint,
+            "lock_index": lock_index,
+            "search_joint": None,
+            "search_index": None,
+            "family": "",
+        },
+        locked_angle,
+        wrist_concurrency_tol,
+        search_joint_candidates=None,
+        max_search_joint_candidates=max_search_joint_candidates,
+        **search_kwargs,
+    )
+    if not solver.hasKnownDecomposition():
+        raise ValueError(f"No supported redundancy configuration for lock joint {lock_joint}.")
+    return solver, "semi-analytical", solver.getSearchJointCandidates(), lock_joint
 
 
 class SearchableRedundantUrdfRobot(IKRobot):
@@ -286,6 +779,9 @@ class SearchableRedundantUrdfRobot(IKRobot):
             self._last_search_angle[joint_index] = state["best_q"]
 
         return [(state["best_ls"], state["best_err"], state["best_row"])]
+
+    def getLockJoint(self) -> int:
+        return self._fixed_axes[0][0] + 1
 
     def getSearchJointCandidates(self) -> list[dict]:
         return list(self._candidate_info)

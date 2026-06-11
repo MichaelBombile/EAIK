@@ -12,7 +12,7 @@ if local_src not in eaik.__path__:
     eaik.__path__.insert(0, local_src)
 
 from eaik.IK_URDF import UrdfRobot
-from eaik.IK_Redundant import SearchableRedundantUrdfRobot
+from eaik.IK_Redundant import build_redundant_urdf_robot, discover_redundancy_configs
 import evaluate_ik as eval
 
 DEFAULT_URDF = (
@@ -25,6 +25,21 @@ DEFAULT_LOCK_JOINT = 7  # 1-based joint index; EAIK example locks the 7th joint 
 
 class Unsupported7DofRobotError(RuntimeError):
     """Raised when no EAIK subproblem decomposition exists for the locked 7-DOF chain."""
+
+
+def format_redundancy_table(configs: list[dict]) -> str:
+    lines = ["Ranked redundancy configurations:"]
+    for index, config in enumerate(configs, start=1):
+        if config["mode"] == "analytical":
+            lines.append(
+                f"  {index:2d}. lock j{config['lock_joint']} -> {config['family']} (analytical)"
+            )
+        else:
+            lines.append(
+                f"  {index:2d}. lock j{config['lock_joint']}, search j{config['search_joint']} "
+                f"-> {config['family']} (semi-analytical)"
+            )
+    return "\n".join(lines)
 
 
 def diagnose_lock_candidates(path: str) -> list[dict]:
@@ -43,53 +58,57 @@ def diagnose_lock_candidates(path: str) -> list[dict]:
     return results
 
 
-def build_7dof_bot(path: str, lock_joint: int, locked_angle: float, search_options: dict | None = None):
-    """Build either a direct analytical 6R reduction or the semi-analytical 7R fallback."""
-    if not 1 <= lock_joint <= 7:
+def build_7dof_bot(
+    path: str,
+    lock_joint: int | None,
+    locked_angle: float,
+    search_options: dict | None = None,
+    auto_lock: bool = False,
+    search_joint: int | None = None,
+):
+    """Build the best available analytical or semi-analytical 7-DOF redundancy solver."""
+    search_options = dict(search_options or {})
+    max_redundancy_configs = int(search_options.pop("max_redundancy_configs", 1))
+    max_search_joint_candidates = int(search_options.pop("max_search_joint_candidates", 1))
+
+    if auto_lock:
+        lock_joint = None
+    elif lock_joint is not None and not 1 <= lock_joint <= 7:
         raise ValueError(f"lock_joint must be between 1 and 7, got {lock_joint}")
+    if search_joint is not None and not 1 <= search_joint <= 7:
+        raise ValueError(f"search_joint must be between 1 and 7, got {search_joint}")
 
-    search_options = search_options or {}
-    lock_index = lock_joint - 1
-    bot = UrdfRobot(path, [(lock_index, locked_angle)])
-    if bot.hasKnownDecomposition():
-        return bot, "analytical", []
-
-    fallback_bot = SearchableRedundantUrdfRobot(path, [(lock_index, locked_angle)], **search_options)
-    if fallback_bot.hasKnownDecomposition():
-        return fallback_bot, "semi-analytical", fallback_bot.getSearchJointCandidates()
-
-    candidates = diagnose_lock_candidates(path)
-    supported = [c for c in candidates if c["supported"]]
-
-    message = (
-        f"EAIK cannot solve this 7-DOF robot with joint {lock_joint} locked at "
-        f"{locked_angle:.4f} rad.\n"
-        f"  Kinematic family: {bot.getKinematicFamily()}\n"
-        f"  Spherical wrist:  {bot.hasSphericalWrist()}\n"
-        f"  Known decomposition: {bot.hasKnownDecomposition()}\n"
-    )
-
-    if supported:
-        supported_joints = ", ".join(str(c["joint"]) for c in supported)
-        message += (
-            f"Other lock joints that EAIK does support for this URDF: {supported_joints}\n"
-            f"Re-run with --lock-joint set to one of those values.\n"
+    try:
+        bot, mode, active_configs, resolved_lock_joint = build_redundant_urdf_robot(
+            path,
+            lock_joint=lock_joint,
+            locked_angle=locked_angle,
+            search_joint=search_joint,
+            max_redundancy_configs=max_redundancy_configs,
+            max_search_joint_candidates=max_search_joint_candidates,
+            **search_options,
         )
-    else:
-        message += (
-            "No single-joint lock produced a supported 6R decomposition for this URDF.\n"
-            "The arm also did not reduce to any supported 5R family through the 1D fallback search.\n"
-        )
+        return bot, mode, active_configs, resolved_lock_joint
+    except ValueError as exc:
+        candidates = diagnose_lock_candidates(path)
+        redundancy = discover_redundancy_configs(path, locked_angle)
 
-    message += "Lock-joint scan:\n"
-    for candidate in candidates:
-        status = "supported" if candidate["supported"] else "unsupported"
-        message += (
-            f"  joint {candidate['joint']}: {candidate['family']} "
-            f"({status}, spherical={candidate['spherical_wrist']})\n"
-        )
+        message = str(exc) + "\n"
+        if redundancy:
+            message += "\n" + format_redundancy_table(redundancy[:15])
+            if len(redundancy) > 15:
+                message += f"\n  ... and {len(redundancy) - 15} more. Use --list-redundancy to see all."
+            message += "\nTry --auto-lock or pass --max-search-candidates > 1.\n"
+        else:
+            message += "Lock-joint scan:\n"
+            for candidate in candidates:
+                status = "supported" if candidate["supported"] else "unsupported"
+                message += (
+                    f"  joint {candidate['joint']}: {candidate['family']} "
+                    f"({status}, spherical={candidate['spherical_wrist']})\n"
+                )
 
-    raise Unsupported7DofRobotError(message)
+        raise Unsupported7DofRobotError(message) from exc
 
 
 def ndof_example(
@@ -99,28 +118,46 @@ def ndof_example(
     locked_angle=0.0,
     measure_time=False,
     search_options: dict | None = None,
+    auto_lock: bool = False,
+    search_joint: int | None = None,
 ):
     """
     Load a 7-DOF robot from URDF, lock one joint, and run analytical or semi-analytical IK on random poses.
     """
-    bot, mode, search_candidates = build_7dof_bot(path, lock_joint, locked_angle, search_options)
+    bot, mode, search_candidates, resolved_lock_joint = build_7dof_bot(
+        path,
+        lock_joint,
+        locked_angle,
+        search_options,
+        auto_lock=auto_lock,
+        search_joint=search_joint,
+    )
 
     print("Kinematic family:", bot.getKinematicFamily())
     print("Spherical wrist:", bot.hasSphericalWrist())
-    print("Locked joint:", lock_joint, f"at {locked_angle:.4f} rad")
+    if auto_lock:
+        print("Lock selection:", "auto")
+    print("Locked joint:", resolved_lock_joint, f"at {locked_angle:.4f} rad")
     print("Solve mode:", mode)
     if mode == "semi-analytical" and hasattr(bot, "getSearchMethod"):
         print("1D search method:", bot.getSearchMethod())
     if search_candidates:
-        search_summary = ", ".join(
-            f"joint {entry['joint']} -> {entry['family']}" for entry in search_candidates
-        )
-        print("1D search candidates:", search_summary)
+        if "search_joint" in search_candidates[0]:
+            config_summary = ", ".join(
+                f"lock j{entry['lock_joint']}, search j{entry['search_joint']} -> {entry['family']}"
+                for entry in search_candidates
+            )
+            print("Active redundancy configs:", config_summary)
+        else:
+            search_summary = ", ".join(
+                f"joint {entry['joint']} -> {entry['family']}" for entry in search_candidates
+            )
+            print("1D search candidates:", search_summary)
 
     test_angles = []
     for _ in range(batch_size):
         rand_angles = np.random.random(7) * 2 * np.pi
-        rand_angles[lock_joint - 1] = locked_angle
+        rand_angles[resolved_lock_joint - 1] = locked_angle
         test_angles.append(rand_angles)
 
     poses = [bot.fwdKin(angles) for angles in test_angles]
@@ -167,6 +204,34 @@ def main():
         type=int,
         default=DEFAULT_LOCK_JOINT,
         help="1-based joint index to lock before solving IK (Panda example uses 4, KUKA uses 3)",
+    )
+    parser.add_argument(
+        "--auto-lock",
+        action="store_true",
+        help="Automatically pick the best lock/search redundancy pair for this URDF",
+    )
+    parser.add_argument(
+        "--search-joint",
+        type=int,
+        default=None,
+        help="Optional 1-based joint to search when using semi-analytical fallback",
+    )
+    parser.add_argument(
+        "--max-search-candidates",
+        type=int,
+        default=1,
+        help="When --lock-joint is fixed, try up to this many ranked search joints (default: 1)",
+    )
+    parser.add_argument(
+        "--max-redundancy-configs",
+        type=int,
+        default=1,
+        help="With --auto-lock, try up to this many ranked lock/search pairs per pose (default: 1)",
+    )
+    parser.add_argument(
+        "--list-redundancy",
+        action="store_true",
+        help="Print ranked lock/search redundancy options for the URDF and exit",
     )
     parser.add_argument(
         "--locked-angle",
@@ -222,6 +287,14 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.list_redundancy:
+        configs = discover_redundancy_configs(args.urdf, args.locked_angle)
+        if not configs:
+            print("No supported redundancy configurations found.", file=sys.stderr)
+            sys.exit(1)
+        print(format_redundancy_table(configs))
+        sys.exit(0)
+
     search_options = {
         "search_method": args.search_method,
         "search_grid_size": args.search_grid_size,
@@ -230,6 +303,8 @@ def main():
         "solution_tolerance": args.solution_tolerance,
         "brent_xatol": args.brent_xatol,
         "warm_start": not args.no_warm_start,
+        "max_search_joint_candidates": args.max_search_candidates,
+        "max_redundancy_configs": args.max_redundancy_configs,
     }
 
     try:
@@ -240,6 +315,8 @@ def main():
             args.locked_angle,
             measure_time=args.measure_time,
             search_options=search_options,
+            auto_lock=args.auto_lock,
+            search_joint=args.search_joint,
         )
     except Unsupported7DofRobotError as exc:
         print(str(exc), file=sys.stderr)
