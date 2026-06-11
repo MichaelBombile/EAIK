@@ -134,6 +134,9 @@ def ndof_example(
     )
 
     print("Kinematic family:", bot.getKinematicFamily())
+    family = bot.getKinematicFamily()
+    if family.startswith("7R-OFFSET_WRIST"):
+        print("Solver backend: native C++ offset-wrist 7R (SP3 + 5R analytical)")
     print("Spherical wrist:", bot.hasSphericalWrist())
     if auto_lock:
         print("Lock selection:", "auto")
@@ -142,10 +145,15 @@ def ndof_example(
     if mode == "semi-analytical" and hasattr(bot, "getSearchMethod"):
         print("1D search method:", bot.getSearchMethod())
     if search_candidates:
-        if "search_joint" in search_candidates[0]:
+        if search_candidates[0].get("search_joint") is not None:
             config_summary = ", ".join(
                 f"lock j{entry['lock_joint']}, search j{entry['search_joint']} -> {entry['family']}"
                 for entry in search_candidates
+            )
+            print("Active redundancy configs:", config_summary)
+        elif "family" in search_candidates[0]:
+            config_summary = ", ".join(
+                f"lock j{entry['lock_joint']} -> {entry['family']}" for entry in search_candidates
             )
             print("Active redundancy configs:", config_summary)
         else:

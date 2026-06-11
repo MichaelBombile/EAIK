@@ -70,6 +70,7 @@ ext_modules = [
                 "CPP/src/IK/4R_IK.cpp",
                 "CPP/src/IK/5R_IK.cpp",
                 "CPP/src/IK/6R_IK.cpp",
+                "CPP/src/IK/7R_IK.cpp",
                 "CPP/src/EAIK.cpp",
                 "CPP/src/utils/kinematic_remodeling.cpp",
                 "CPP/external/ik-geo/cpp/subproblems/sp.cpp",

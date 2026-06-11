@@ -36,6 +36,30 @@ namespace EAIK
             throw std::runtime_error("Wrong input dimensions for H and P. Note that #P = #H+1.");
         }
 
+        if (H.cols() == 7 && fixed_axes.size() == 1)
+        {
+            const auto &[H_part, P_part, R6T_part] = partial_joint_parametrization(H, P, fixed_axes, R6T);
+            const Eigen::MatrixXd P_reduced =
+                remodel_kinematics(H_part, P_part, ZERO_THRESHOLD, AXIS_INTERSECT_THRESHOLD);
+            const IKS::General_6R reduced_probe(H_part, P_reduced, WRIST_CONCURRENCY_TOL);
+            if (!reduced_probe.has_known_decomposition())
+            {
+                this->fixed_axes = fixed_axes;
+                std::sort(this->fixed_axes.begin(), this->fixed_axes.end(), [](const std::pair<int, double>& a, const std::pair<int, double>& b) {return a.first < b.first;});
+                this->R6T_partial = R6T;
+                bot_kinematics = std::make_unique<IKS::General_7R>(
+                    H,
+                    P,
+                    R6T,
+                    fixed_axes.front().first,
+                    fixed_axes.front().second,
+                    ZERO_THRESHOLD,
+                    AXIS_INTERSECT_THRESHOLD);
+                original_kinematics = std::make_unique<IKS::General_Robot>(H, P);
+                return;
+            }
+        }
+
         Eigen::MatrixXd P_remodeled;
         Eigen::MatrixXd H_remodeled;
 
@@ -122,8 +146,16 @@ namespace EAIK
         }
 
         IKS::Homogeneous_T ee_06_rot = ee_position_orientation;
-        ee_06_rot.block<3,3>(0,0) *= R6T_partial.transpose();
+        if (!bot_kinematics->returns_full_configuration())
+        {
+            ee_06_rot.block<3,3>(0,0) *= R6T_partial.transpose();
+        }
         IKS::IK_Solution solution = bot_kinematics->calculate_IK(ee_06_rot);
+
+        if (bot_kinematics->returns_full_configuration())
+        {
+            return solution;
+        }
 
         // TODO: Find alternative to this costly insert operation
         for(const auto&[joint_index, value] : fixed_axes)

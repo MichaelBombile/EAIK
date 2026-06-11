@@ -34,6 +34,7 @@ namespace IKS
 
         virtual bool has_known_decomposition() const;
         virtual bool is_spherical() const;
+        virtual bool returns_full_configuration() const { return false; }
 
         virtual Eigen::MatrixXd get_H() const final { return H; }
         virtual Eigen::MatrixXd get_P() const final { return P; }
@@ -214,6 +215,66 @@ namespace IKS
         double wrist_concurrency_tol{1e-4};
 
         std::unique_ptr<General_6R> reversed_Robot_ptr;   // If kinematic class demands kinematic inversion, this robot will be used
+    };
+
+    class General_7R : public General_Robot
+    {
+        // 7-DOF offset-wrist manipulators with one locked redundant joint.
+        // Resolves the remaining 1-DOF redundancy analytically via SP3 roots
+        // and a locked 5R subproblem decomposition.
+    public:
+        General_7R(const Eigen::MatrixXd &H,
+                     const Eigen::MatrixXd &P,
+                     const Eigen::Matrix<double, 3, 3> &R6T,
+                     int locked_joint_index,
+                     double locked_joint_value,
+                     double zero_threshold = 1e-7,
+                     double axis_intersect_threshold = 1e-6,
+                     int search_joint_index = -1);
+
+        IK_Solution calculate_IK(const Homogeneous_T &ee_position_orientation) const override;
+
+        bool has_known_decomposition() const override;
+        bool is_spherical() const override { return false; }
+        bool returns_full_configuration() const override { return true; }
+
+        std::string get_kinematic_family() const override;
+        int get_search_joint_index() const { return search_joint_index; }
+
+    private:
+        enum class FiveRClass
+        {
+            SP3_ANALYTICAL = 0,
+            GENERIC = 1,
+            UNSUPPORTED = 2
+        };
+
+        Eigen::MatrixXd H;
+        Eigen::MatrixXd P;
+        Eigen::Matrix<double, 3, 3> R6T;
+        int locked_joint_index;
+        double locked_joint_value;
+        int search_joint_index;
+        FiveRClass five_r_class{FiveRClass::UNSUPPORTED};
+        std::string five_r_family;
+        double ZERO_THRESHOLD;
+        double AXIS_INTERSECT_THRESHOLD;
+
+        int detect_search_joint();
+        FiveRClass classify_five_r_family(const std::string &family) const;
+        bool build_reduced_5r(double search_angle,
+                              Eigen::Matrix<double, 3, 5> &H5,
+                              Eigen::Matrix<double, 3, 6> &P5,
+                              Eigen::Matrix<double, 3, 3> &R5) const;
+        bool build_reduced_5r_for_joint(int search_index,
+                                        double search_angle,
+                                        Eigen::Matrix<double, 3, 5> &H5,
+                                        Eigen::Matrix<double, 3, 6> &P5,
+                                        Eigen::Matrix<double, 3, 3> &R5) const;
+        std::vector<double> sp3_search_candidates(const Homogeneous_T &ee_pose, double seed_q) const;
+        std::vector<double> expand_to_7dof(const std::vector<double> &q5, double search_angle) const;
+        IK_Solution solve_at_search_angle(const Homogeneous_T &ee_pose, double search_angle) const;
+        IK_Solution rank_solutions_by_fk_error(IK_Solution solution, const Homogeneous_T &desired_pose) const;
     };
 }
 
